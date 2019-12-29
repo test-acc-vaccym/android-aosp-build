@@ -14,8 +14,7 @@
 # echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections
 
 # customization settings
-CUSTOMIZATIONS_DIR="$HOME/configs"
-
+CUSTOMIZATIONS_DIR=$(dirname $(realpath $0))/configs
 # wrapper for AWS commands to locally process
 source $(dirname "$0")/aws_wrapper.sh
 
@@ -238,7 +237,7 @@ check_for_new_versions() {
   if [ "$existing_chromium" == "$LATEST_CHROMIUM" ] && [ "$chromium_included" == "yes" ]; then
     echo "Chromium build ($existing_chromium) is up to date"
   else
-    echo "Chromium needs to be updated to ${LATEST_CHROMIUM}"
+    echo "Chromium needs to be updated to ${LATEST_CHROMIUM} (current $existing_chromium)"
     echo "no" | aws s3 cp - "s3://${AWS_RELEASE_BUCKET}/chromium/included"
     needs_update=true
     if [ "$existing_chromium" == "$LATEST_CHROMIUM" ]; then
@@ -307,7 +306,7 @@ full_run() {
   #  attestation_setup
   #fi
   setup_vendor
-  build_fdroid
+  check_fdroid # build_fdroid
   apply_patches
   # only marlin and sailfish need kernel rebuilt so that verity_key is included
   if [ "${DEVICE}" == "marlin" ] || [ "${DEVICE}" == "sailfish" ]; then
@@ -339,10 +338,13 @@ build_fdroid() {
   pushd ${HOME}/fdroidclient
   echo "sdk.dir=${HOME}/sdk" > local.properties
   echo "sdk.dir=${HOME}/sdk" > app/local.properties
-  git checkout $FDROID_CLIENT_VERSION
+  git checkout $1
   retry ./gradlew assembleRelease
   cp -f app/build/outputs/apk/full/release/app-full-release-unsigned.apk ${BUILD_DIR}/packages/apps/F-Droid/F-Droid.apk
+  aws s3 cp "app/build/outputs/apk/full/release/app-full-release-unsigned.apk" "s3://${AWS_RELEASE_BUCKET}/fdroid/F-Droid.apk"
   popd
+
+  echo "${FDROID_CLIENT_VERSION}" | aws s3 cp - "s3://${AWS_RELEASE_BUCKET}/fdroid/revision"
 }
 
 #attestation_setup() {
@@ -574,6 +576,22 @@ setup_env() {
   git config --global color.ui true
 }
 
+check_fdroid() {
+  log_header ${FUNCNAME}
+
+  current=$(aws s3 cp "s3://${AWS_RELEASE_BUCKET}/fdroid/revision" - || true)
+  log "Fdroid current: $current"
+
+  log "Fdroid latest: $FDROID_CLIENT_VERSION"
+  if [ "$FDROID_CLIENT_VERSION" == "$current" ]; then
+    log "Fdroid latest ($FDROID_CLIENT_VERSION) matches current ($current)"
+  else
+    log "Building fdroid $FDROID_CLIENT_VERSION"
+    build_fdroid $FDROID_CLIENT_VERSION
+  fi
+  rm -rf $HOME/fdroidclient
+}
+
 check_chromium() {
   log_header ${FUNCNAME}
 
@@ -671,15 +689,15 @@ aosp_repo_modifications() {
   # TODO: remove revision=dev from platform_external_chromium in future release, didn't want to break build for anyone on beta 10.x build
   # make modifications to default AOSP
   if ! grep -q "RattlesnakeOS" .repo/manifest.xml; then
-    CMR=$(sed 1d "${CUSTOMIZATIONS_DIR}/CustomManifestRemotes.conf" | while IFS=! read -r _Name _Fetch _Revision; do printf "<remote name=\"$_Name\" fetch=\"$_Fetch\" revision=\"$_Revision\" />"; done;)
-    CMP=$(sed 1d "${CUSTOMIZATIONS_DIR}/CustomManifestProjects.conf" | while IFS=! read -r _Path _Name _Remote _Modules; do printf "<project path=\"$_Path\" name=\"$_Name\" remote=\"$_Remote\" />"; done;)
+#    CMR=$(sed 1d "${CUSTOMIZATIONS_DIR}/CustomManifestRemotes.conf" | while IFS=! read -r _Name _Fetch _Revision; do printf "<remote name=\"$_Name\" fetch=\"$_Fetch\" revision=\"$_Revision\" />"; done;)
+#    CMP=$(sed 1d "${CUSTOMIZATIONS_DIR}/CustomManifestProjects.conf" | while IFS=! read -r _Path _Name _Remote _Modules; do printf "<project path=\"$_Path\" name=\"$_Name\" remote=\"$_Remote\" />"; done;)
     # really ugly awk script to add additional repos to manifest
     gawk -i inplace \
       -v ANDROID_VERSION="$ANDROID_VERSION" \
       -v FDROID_CLIENT_VERSION="$FDROID_CLIENT_VERSION" \
       -v FDROID_PRIV_EXT_VERSION="$FDROID_PRIV_EXT_VERSION" \
-      -v CUSTOM_MANIFEST_REMOTES="$CMR" \
-      -v CUSTOM_MANIFEST_PROJECTS="$CMP"
+      -v CUSTOM_MANIFEST_REMOTES="" \
+      -v CUSTOM_MANIFEST_PROJECTS="" \
       '1;/<repo-hooks in-project=/{
       print "  ";
       print "  <remote name=\"github\" fetch=\"https://github.com/RattlesnakeOS/\" revision=\"" ANDROID_VERSION "\" />";
@@ -817,40 +835,41 @@ patch_custom() {
   cd $BUILD_DIR
 
   # allow custom patches to be applied
-  patches_dir="$HOME/patches"
+  patches_dir="${CUSTOMIZATIONS_DIR}/patches"
   # <% if .CustomPatches %>
-  ITER=0 && sed 1d "${CUSTOMIZATIONS_DIR}/CustomPatches.conf" | while IFS=! read -r _Repo _Patches; do #<% range $i, $r := .CustomPatches %>
-    retry git clone $_Repo ${patches_dir}/$ITER #retry git clone <% $r.Repo %> ${patches_dir}/<% $i %>
-    echo $_Patches | while IFS=! read -a __Patches; do for _Patch in ${__Patches[@]}; do #<% range $r.Patches %>
-      log "Applying patch $_Patch" #log "Applying patch <% . %>"
-      patch -p1 --no-backup-if-mismatch < ${patches_dir}/$ITER/$_Patch #patch -p1 --no-backup-if-mismatch < ${patches_dir}/<% $i %>/<% . %>
-    done; done; #<% end %>
-  ((ITER++)); done; #<% end %> 
+  # <% range $i, $r := .CustomPatches %>
+  # retry git clone <% $r.Repo %> ${patches_dir}/<% $i %>
+  find $patches_dir -type f -name *.patch -exec readlink -f {} \; | while read _Patch; do #<% range $r.Patches %>
+    log "Applying patch $_Patch" #log "Applying patch <% . %>"
+    patch -p1 --no-backup-if-mismatch < $_Patch #patch -p1 --no-backup-if-mismatch < ${patches_dir}/<% $i %>/<% . %>
+  done;
+  # <% end %>
+  # <% end %> 
   # <% end %>
 
   # allow custom scripts to be applied
-  scripts_dir="$HOME/scripts"
+  scripts_dir="${CUSTOMIZATIONS_DIR}/scripts"
   # <% if .CustomScripts %>
-  ITER=0 && sed 1d "${CUSTOMIZATIONS_DIR}/CustomScripts.conf" | while IFS=! read -r _Repo _Scripts; do # <% range $i, $r := .CustomScripts %>
-    retry git clone $_Repo ${scripts_dir}/$ITER # retry git clone <% $r.Repo %> ${scripts_dir}/<% $i %>
-    echo $_Scripts | while IFS=! read -a __Scripts; do for _Script in ${__Scripts[@]}; do  #<% range $r.Scripts %>
-      log "Applying shell script $_Script" # log "Applying shell script <% . %>"
-      . ${scripts_dir}/$ITER/$_Script #. ${scripts_dir}/<% $i %>/<% . %>
-    done; done; # <% end %>
-  ((ITER++)); done; # <% end %>
+  # <% range $i, $r := .CustomScripts %>
+    # retry git clone <% $r.Repo %> ${scripts_dir}/<% $i %>
+  find $scripts_dir -type f -name *.sh -exec readlink -f {} \; | while read _Script; do # <% range $r.Scripts %>
+    log "Applying shell script $_Script" # log "Applying shell script <% . %>"
+    echo ". $_Script" # . ${scripts_dir}/<% $i %>/<% . %>
+  done;  # <% end %>
+  # <% end %>
   # <% end %>
 
   # allow prebuilt applications to be added to build tree
   prebuilt_dir="$BUILD_DIR/packages/apps/Custom"
   # <% if .CustomPrebuilts %>
-  ITER=0 && sed 1d "${CUSTOMIZATIONS_DIR}/CustomPrebuilts.conf" | while IFS=! read -r _Repo _Apps; do # <% range $i, $r := .CustomPrebuilts %>
-    log "Putting custom prebuilts from $_Repo in build tree location ${prebuilt_dir}/$ITER" # log "Putting custom prebuilts from <% $r.Repo %> in build tree location ${prebuilt_dir}/<% $i %>"
-    retry git clone $_Repo ${prebuilt_dir}/$ITER # retry git clone <% $r.Repo %> ${prebuilt_dir}/<% $i %>
-    echo $_Apps | while IFS=! read -a __Apps; do for _App in ${__Apps[@]}; do # <% range .Modules %>
-      log "Adding custom PRODUCT_PACKAGES += $_App to $(get_package_mk_file)" # log "Adding custom PRODUCT_PACKAGES += <% . %> to $(get_package_mk_file)"
-      sed -i "\$aPRODUCT_PACKAGES += $_App" $(get_package_mk_file) # sed -i "\$aPRODUCT_PACKAGES += <% . %>" $(get_package_mk_file)
-    done; done; # <% end %>
-  ((ITER++)); done; # <% end %>
+  # <% range $i, $r := .CustomPrebuilts %>
+    # log "Putting custom prebuilts from <% $r.Repo %> in build tree location ${prebuilt_dir}/<% $i %>"
+    # retry git clone <% $r.Repo %> ${prebuilt_dir}/<% $i %>
+    # <% range .Modules %>
+      # log "Adding custom PRODUCT_PACKAGES += <% . %> to $(get_package_mk_file)"
+      # sed -i "\$aPRODUCT_PACKAGES += <% . %>" $(get_package_mk_file)
+    # <% end %>
+  # <% end %>
   # <% end %>
 
   # allow custom hosts file
@@ -918,12 +937,12 @@ patch_add_apps() {
   #fi
 
   # add any modules defined in custom manifest projects
-  ITER=0 && sed 1d "${CUSTOMIZATIONS_DIR}/CustomManifestProjects.conf" | while IFS=! read -r _Path _Name _Remote _Modules; do echo $_Modules | while IFS=! read -a __Modules; do for _Mod in ${__Modules[@]}; do #<% if .CustomManifestProjects %><% range $i, $r := .CustomManifestProjects %><% range $j, $q := .Modules %>
-  log "Adding custom PRODUCT_PACKAGES += $_Mod to ${mk_file}" # log "Adding custom PRODUCT_PACKAGES += <% $q %> to ${mk_file}"
-  sed -i "\$aPRODUCT_PACKAGES += $_Mod" ${mk_file} # sed -i "\$aPRODUCT_PACKAGES += <% $q %>" ${mk_file}
-  ((ITER++)); done; # <% end %>
-  done; # <% end %>
-  done; # <% end %>
+  #<% if .CustomManifestProjects %><% range $i, $r := .CustomManifestProjects %><% range $j, $q := .Modules %>
+    # log "Adding custom PRODUCT_PACKAGES += <% $q %> to ${mk_file}"
+    # sed -i "\$aPRODUCT_PACKAGES += <% $q %>" ${mk_file}
+  # <% end %>
+  # <% end %>
+  # <% end %>
 }
 
 patch_updater() {
@@ -1277,13 +1296,13 @@ cleanup() {
 }
 
 log_header() {
-  echo "=================================="
-  echo "$(date "+%Y-%m-%d %H:%M:%S"): Running $1"
-  echo "=================================="
+  echo "==================================" >/dev/tty
+  echo "$(date "+%Y-%m-%d %H:%M:%S"): Running $1" >/dev/tty
+  echo "==================================" >/dev/tty
 }
 
 log() {
-  echo "$(date "+%Y-%m-%d %H:%M:%S"): $1"
+  echo "$(date "+%Y-%m-%d %H:%M:%S"): $@" >/dev/tty
 }
 
 retry() {

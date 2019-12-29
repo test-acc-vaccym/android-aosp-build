@@ -4,8 +4,10 @@
 # aws s3 ls
 # aws s3 cp
 # aws s3 sync
-llog() {
-  echo "$(date "+%Y-%m-%d %H:%M:%S"): $1"
+
+DBUG="true"
+_awl() {
+  [ $DBUG = "true" ] && echo -e "\e[2m$(date "+%Y-%m-%d %H:%M:%S"): $@\e[22m" >/dev/tty 
 }
 aws(){
     ALL_ARGS=("$@")
@@ -17,36 +19,48 @@ aws(){
     if [[ "$AWS_ENV_TYPE" = "s3" ]]; then
         case "$AWS_CMD" in 
             ls)
-                llog "aws cmd replacement: aws $@ <-to-> ls ${MOD_ARGS}"
-                ls ${MOD_ARGS}
+                if [ -f ${MOD_ARGS} ] || [ -d ${MOD_ARGS} ]; then
+                    _awl "aws cmd replacement: aws $@ <-to-> ls ${MOD_ARGS}"
+                    ls ${MOD_ARGS}
+                else
+                    _awl "aws cmd replacement: aws $@ <-to-> printf \"\""
+                    printf ""
+                fi
             ;;
             cp)
                 if [[ "${ALL_ARGS[2]}" = "-" ]]; then # ${ALL_ARGS[2]} src is - do something
-                    llog "aws cmd replacement: aws $@ <-to-> cat 1>${ALL_ARGS[3]//$AWS_S3_DESCR/"$HOME/"}"
-                    [ ! -d ${ALL_ARGS[3]//$AWS_S3_DESCR/"$HOME/"} ] && mkdir -p "$(dirname ${ALL_ARGS[3]//$AWS_S3_DESCR/"$HOME/"})"
-                    [ ! -f ${ALL_ARGS[3]//$AWS_S3_DESCR/"$HOME/"} ] && touch "${ALL_ARGS[3]//$AWS_S3_DESCR/"$HOME/"}"
+                    _awl "aws cmd replacement: aws $@ <-to-> cat 1>${ALL_ARGS[3]//$AWS_S3_DESCR/"$HOME/"}"
                     cat 1>${ALL_ARGS[3]//$AWS_S3_DESCR/"$HOME/"}
                 elif [[ "${ALL_ARGS[3]}" = "-" ]]; then # ${ALL_ARGS[3]} dst is - do something
-                    llog "aws cmd replacement: aws $@ <-to-> cat ${ALL_ARGS[2]//$AWS_S3_DESCR/"$HOME/"}"
-                    [ -f ${ALL_ARGS[2]//$AWS_S3_DESCR/"$HOME/"} ] && cat ${ALL_ARGS[2]//$AWS_S3_DESCR/"$HOME/"} || echo ""
+                    if [ -f ${ALL_ARGS[2]//$AWS_S3_DESCR/"$HOME/"} ]; then
+                        _awl "aws cmd replacement: aws $@ <-to-> cat ${ALL_ARGS[2]//$AWS_S3_DESCR/"$HOME/"}"
+                        cat ${ALL_ARGS[2]//$AWS_S3_DESCR/"$HOME/"}
+                    else
+                        _awl "aws cmd replacement: aws $@ <-to-> printf \"\""
+                        printf ""
+                    fi
                 else #else just a normal copy
-                    llog "aws cmd replacement: aws $@ <-to-> cp ${MOD_ARGS}"
+                    _awl "aws cmd replacement: aws $@ <-to-> cp ${MOD_ARGS}"
                     cp ${MOD_ARGS} 
                 fi
             ;;
             sync)
-                llog "aws cmd replacement: aws $@ <-to-> rsync ${MOD_ARGS}"
+                _awl "aws cmd replacement: aws $@ <-to-> rsync ${MOD_ARGS}"
                 rsync ${MOD_ARGS}
             ;;
+            rm)
+                _awl "aws cmd replacement: aws $@ <-to-> rm ${MOD_ARGS}"
+                rm ${MOD_ARGS}
+            ;;
             *)
-            llog "command $AWS_CMD not recognized. review and update script. stopping..."
+            _awl "command $AWS_CMD not recognized. review and update script. stopping..."
             exit 1
             ;;
         esac
     fi
     if [[ "$AWS_ENV_TYPE" = "sns" ]]; then
-        llog "ATTENTION no SNS available yet: $@"
-        read -p "Press enter to continue"
+        _awl "ATTENTION no SNS available yet: $@"
+        # read -p "Press enter to continue"
     fi
 }
 
