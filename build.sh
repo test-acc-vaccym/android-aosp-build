@@ -333,6 +333,8 @@ add_chromium() {
 build_fdroid() {
   log_header ${FUNCNAME}
 
+  aws s3 mkdir -p "s3://${AWS_RELEASE_BUCKET}/fdroid"
+
   # build it outside AOSP build tree or hit errors
   git clone https://gitlab.com/fdroid/fdroidclient ${HOME}/fdroidclient
   pushd ${HOME}/fdroidclient

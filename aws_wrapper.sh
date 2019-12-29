@@ -52,6 +52,10 @@ aws(){
                 _awl "aws cmd replacement: aws $@ <-to-> rm ${MOD_ARGS}"
                 rm ${MOD_ARGS}
             ;;
+            mkdir)
+                _awl "aws cmd replacement: aws $@ <-to-> mkdir ${MOD_ARGS}"
+                mkdir ${MOD_ARGS}
+            ;;
             *)
             _awl "command $AWS_CMD not recognized. review and update script. stopping..."
             exit 1
