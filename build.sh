@@ -2,6 +2,7 @@
 # minimal script modifications to change
 # https://github.com/dan-v/rattlesnakeos-stack/blob/10.0/templates/build_template.go
 
+# TODO: make a setup script of out of this
 # SETUP Environment
 # apt-get -y install jq
 # apt-get -y install gpg
@@ -13,10 +14,11 @@
 # apt-get -y install python-protobuf
 # echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections
 
+BUILD_SCRIPT_DIR=$(dirname $(realpath "$0"))
 # customization settings
-CUSTOMIZATIONS_DIR=$(dirname $(realpath $0))/configs
+CUSTOMIZATIONS_DIR=$BUILD_SCRIPT_DIR/configs
 # wrapper for AWS commands to locally process
-source $(dirname "$0")/aws_wrapper.sh
+source $BUILD_SCRIPT_DIR/aws_wrapper.sh
 
 if [ $# -lt 1 ]; then
   echo "Need to specify device name as argument"
@@ -313,6 +315,7 @@ full_run() {
     rebuild_marlin_kernel
   fi
   add_chromium
+  add_fdroid
   build_aosp
   release "${DEVICE}"
   aws_upload
@@ -320,6 +323,13 @@ full_run() {
   aws_notify "RattlesnakeOS Build SUCCESS"
 }
 
+add_fdroid() {
+  log_header ${FUNCNAME}
+
+  # replace/add f-droid
+  aws s3 cp -f "s3://${AWS_RELEASE_BUCKET}/fdroid/F-Droid.apk" ${BUILD_DIR}/packages/apps/F-Droid/F-Droid.apk
+
+}
 add_chromium() {
   log_header ${FUNCNAME}
 
@@ -342,7 +352,7 @@ build_fdroid() {
   echo "sdk.dir=${HOME}/sdk" > app/local.properties
   git checkout $1
   retry ./gradlew assembleRelease
-  cp -f app/build/outputs/apk/full/release/app-full-release-unsigned.apk ${BUILD_DIR}/packages/apps/F-Droid/F-Droid.apk
+#  cp -f app/build/outputs/apk/full/release/app-full-release-unsigned.apk ${BUILD_DIR}/packages/apps/F-Droid/F-Droid.apk
   aws s3 cp "app/build/outputs/apk/full/release/app-full-release-unsigned.apk" "s3://${AWS_RELEASE_BUCKET}/fdroid/F-Droid.apk"
   popd
 
@@ -738,8 +748,13 @@ aosp_repo_sync() {
 
   # sync with retries
   for i in {1..10}; do
-    repo sync -c --no-tags --no-clone-bundle --jobs 32 && break
+    repo sync -d -c --no-tags --no-clone-bundle --jobs 32 && break
   done
+
+  repo forall -vc "git reset --hard"
+
+  # delete rej files from bad patching
+  find ./ -name "*.rej" -type f -delete
 }
 
 setup_vendor() {
